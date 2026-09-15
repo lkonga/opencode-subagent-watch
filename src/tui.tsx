@@ -7,11 +7,15 @@ import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "so
 import { clearActivity, updateActivity, type ActivityMap } from "./activity";
 import { SubagentTracker, type TrackerSnapshot } from "./tracker";
 import { headerSegments, resolveSessionModel, rowLines, sortAndPrune, summarize } from "./sidebar";
+import {
+  COLLAPSED_KEY,
+  DEFAULT_COLLAPSED,
+  PLUGIN_ID,
+  restoreCollapsed,
+  SIDEBAR_ORDER,
+} from "./sidebar-state";
 import { displayStatus, isActive } from "./subagent";
 import { truncateWidth } from "./terminal-text";
-
-const PLUGIN_ID = "opencode-subagent-watch";
-const COLLAPSED_KEY = `${PLUGIN_ID}.collapsed`;
 
 function log(api: TuiPluginApi, level: "debug" | "warn", message: string): void {
   void api.client.app.log({ service: PLUGIN_ID, level, message }).catch(() => {});
@@ -228,7 +232,7 @@ const tui: TuiPlugin = async (api) => {
     loadState: "loading",
     stale: false,
   });
-  const [collapsed, setCollapsed] = createSignal(false);
+  const [collapsed, setCollapsed] = createSignal(DEFAULT_COLLAPSED);
   const [activities, setActivities] = createSignal<ActivityMap>(new Map());
   let kvLoaded = false;
 
@@ -245,12 +249,12 @@ const tui: TuiPlugin = async (api) => {
   const ensureKV = () => {
     if (kvLoaded || !api.kv.ready) return;
     kvLoaded = true;
-    setCollapsed(api.kv.get<boolean>(COLLAPSED_KEY, false));
+    setCollapsed(restoreCollapsed(api.kv));
   };
   const toggle = () => {
     ensureKV();
     if (!api.kv.ready) {
-      setCollapsed(false);
+      setCollapsed(DEFAULT_COLLAPSED);
       return;
     }
     const next = !collapsed();
@@ -295,7 +299,7 @@ const tui: TuiPlugin = async (api) => {
   });
 
   api.slots.register({
-    order: 450,
+    order: SIDEBAR_ORDER,
     slots: {
       sidebar_content(_context, props) {
         return (
