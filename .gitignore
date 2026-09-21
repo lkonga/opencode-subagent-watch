@@ -6,6 +6,11 @@ out
 dist
 *.tgz
 
+# the V2 runtime loads v2/dist/tui.js directly, so that one artifact is tracked
+!v2/dist/
+v2/dist/*
+!v2/dist/tui.js
+
 # code coverage
 coverage
 *.lcov

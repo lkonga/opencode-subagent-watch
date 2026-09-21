@@ -1,0 +1,17 @@
+{
+  "name": "@lkonga/opencode-subagent-watch-v2",
+  "private": true,
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "./dist/tui.js",
+  "exports": {
+    ".": "./dist/tui.js",
+    "./tui": "./dist/tui.js"
+  },
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "test": "bun test"
+  }
+}

@@ -29,18 +29,20 @@
   },
   "scripts": {
     "build": "bun scripts/build.ts",
+    "build:v2": "bun v2/scripts/build.ts",
     "fmt": "oxfmt .",
     "fmt:check": "oxfmt --check .",
-    "lint": "oxlint --deny-warnings .",
+    "lint": "oxlint --deny-warnings --ignore-pattern 'v2/dist/**' .",
     "lint:fix": "oxlint --fix .",
     "test": "bun test",
     "demo": "bun run build && bun demo/provider.ts",
     "typecheck": "tsc --noEmit",
+    "smoke:v2": "bun scripts/smoke-v2-package.ts",
     "precommit:lint": "bun run lint",
     "precommit:typecheck": "bun run typecheck",
     "precommit:test": "bun test --only-failures",
     "precommit": "bun run fmt && bun run --parallel --no-exit-on-error 'precommit:*'",
-    "check": "bun run fmt:check && bun run --parallel --no-exit-on-error 'precommit:*' && bun run build && bun scripts/smoke-package.ts"
+    "check": "bun run fmt:check && bun run --parallel --no-exit-on-error 'precommit:*' && bun run build && bun run build:v2 && bun scripts/smoke-package.ts && bun run smoke:v2"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "1.18.9",

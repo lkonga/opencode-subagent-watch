@@ -18,7 +18,12 @@ describe("sidebar registration state", () => {
     expect(restoreCollapsed(kv)).toBe(false);
   });
 
-  test("orders Subagents before Token Cache's supported slot order", () => {
-    expect(SIDEBAR_ORDER).toBeLessThan(55);
+  test("orders Subagents after Token Cache and before core Todo in the sidebar", () => {
+    // V1 slot orders: Token Cache 55, core Context 100, MCP 200, LSP 300,
+    // core Todo 400. 60 therefore yields Token Cache → Subagents → Todo,
+    // with Context/MCP/LSP in between.
+    expect(SIDEBAR_ORDER).toBe(60);
+    expect(SIDEBAR_ORDER).toBeGreaterThan(55);
+    expect(SIDEBAR_ORDER).toBeLessThan(400);
   });
 });
