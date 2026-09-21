@@ -123,6 +123,31 @@ import { createEffect, createMemo, createSignal as createSignal2, onCleanup } fr
 function isActive(status) {
   return status === "busy" || status === "retry";
 }
+var MAX_DEPTH = 32;
+function depthLabel(depth) {
+  return depth === undefined ? "L?" : `L${depth}`;
+}
+function resolveDepth(rootID, session, lookup) {
+  if (session.id === rootID)
+    return 0;
+  const visited = new Set([session.id]);
+  let current = session;
+  for (let depth = 1;depth <= MAX_DEPTH; depth += 1) {
+    const parentID = current.parentID;
+    if (!parentID)
+      return;
+    if (parentID === rootID)
+      return depth;
+    if (visited.has(parentID))
+      return;
+    visited.add(parentID);
+    const parent = lookup(parentID);
+    if (!parent)
+      return;
+    current = parent;
+  }
+  return;
+}
 function displayStatus(input) {
   if (input.running)
     return "busy";
@@ -296,8 +321,8 @@ function fitActivityOnly(activity, width) {
 function fitActiveDetails(activity, runtime, width, now) {
   const observed = formatActivity(activity, now);
   if (!observed) {
-    const duration2 = runtime ? `dur ${runtime}` : undefined;
-    return fitFields([duration2 ?? ""], width);
+    const duration = runtime ? `dur ${runtime}` : undefined;
+    return fitFields([duration ?? ""], width);
   }
   const duration = runtime ? `dur ${runtime}` : undefined;
   if (duration) {
@@ -332,10 +357,13 @@ function rowLines(child, parentModel, width, now, activity) {
     idle: "-"
   };
   const fullTitle = displayTitle(child.session);
+  const depthPrefix = `${depthLabel(child.depth)} · `;
   const statusPrefix = `${symbol[status]} ${status}`;
-  const fullPrefix = `${symbol[status]} ${status} · `;
+  const statusFullPrefix = `${statusPrefix} · `;
+  const keepDepth = displayWidth(depthPrefix) + displayWidth(statusFullPrefix) < width;
+  const fullPrefix = keepDepth ? `${depthPrefix}${statusFullPrefix}` : statusFullPrefix;
   const showTitle = !!fullTitle && displayWidth(fullPrefix) < width;
-  const prefix = showTitle ? fullPrefix : truncateWidth(statusPrefix, width);
+  const prefix = showTitle ? fullPrefix : truncateWidth(keepDepth ? `${depthPrefix}${statusPrefix}` : statusPrefix, width);
   const title = showTitle ? truncateWidth(fullTitle, width - displayWidth(fullPrefix)) : "";
   const first = prefix + title;
   const agent = sanitizeText(child.session.agent ?? "");
@@ -397,6 +425,7 @@ function createSubagentWatch(context, parent) {
   let reconnectQueued = false;
   const children = createMemo(() => directChildren(context, parent()));
   const running = createMemo(() => runningSessions(context, children()));
+  const lookupSession = (sessionID) => context.data.session.get(sessionID);
   const records = createMemo(() => children().map((session) => ({
     session,
     status: displayStatus({
@@ -405,7 +434,8 @@ function createSubagentWatch(context, parent) {
       retryAt: retries()[session.id]
     }),
     timing: timings()[session.id],
-    errorAt: errors()[session.id]
+    errorAt: errors()[session.id],
+    depth: resolveDepth(parent(), session, lookupSession)
   })));
   const list = createMemo(() => sortAndPrune(records()));
   const summary = createMemo(() => summarize(records()));
@@ -839,9 +869,9 @@ var tuiWatchPlugin = {
 };
 var tui_default = Plugin.define(tuiWatchPlugin);
 export {
-  tui_default as default,
-  PLUGIN_ID,
-  DEFAULT_COLLAPSED,
+  COLLAPSED_INITIAL,
   COLLAPSED_KEY,
-  COLLAPSED_INITIAL
+  DEFAULT_COLLAPSED,
+  PLUGIN_ID,
+  tui_default as default
 };

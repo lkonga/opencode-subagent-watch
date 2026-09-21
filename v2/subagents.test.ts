@@ -11,6 +11,7 @@ import {
   advanceTimings,
   clearActivity,
   clearSettled,
+  depthLabel,
   differingModel,
   displayStatus,
   displayTitle,
@@ -18,9 +19,11 @@ import {
   formatDuration,
   headerLine,
   headerSegments,
+  MAX_DEPTH,
   observeActivity,
   pruneActivity,
   pruneRecord,
+  resolveDepth,
   resolveSessionModel,
   rowLines,
   sortAndPrune,
@@ -28,6 +31,7 @@ import {
   type ActivityMap,
   type DisplayStatus,
   type RunTiming,
+  type SessionLookup,
   type SubagentRecord,
 } from "./subagents.ts";
 
@@ -43,6 +47,8 @@ function record(input: {
   cost?: number;
   timing?: RunTiming;
   errorAt?: number;
+  /** Defaults to 1, i.e. a resolved direct child of the rendered session. */
+  depth?: number;
 }): SubagentRecord {
   return {
     session: {
@@ -57,6 +63,24 @@ function record(input: {
     status: input.status ?? "idle",
     timing: input.timing,
     errorAt: input.errorAt,
+    depth: input.depth ?? 1,
+  };
+}
+
+type ChainEntry = { readonly id: string; readonly parentID?: string };
+
+/** Stored-session lookup over a flat parent chain, as the host store provides. */
+function chain(entries: readonly ChainEntry[]): SessionLookup {
+  const byID = new Map(entries.map((entry) => [entry.id, entry]));
+  return (sessionID) => {
+    const entry = byID.get(sessionID);
+    if (!entry) return undefined;
+    return {
+      id: entry.id,
+      parentID: entry.parentID,
+      cost: 0,
+      time: { created: NOW, updated: NOW },
+    };
   };
 }
 
@@ -213,9 +237,9 @@ describe("rows", () => {
     });
     const activity = { label: "grep", observedAt: NOW - 8_000 };
     const lines = rowLines(child, undefined, 40, NOW, activity);
-    expect(lines.prefix).toBe("* busy · ");
+    expect(lines.prefix).toBe("L1 · * busy · ");
     expect(lines.title).toBe("Locate auth flow");
-    expect(lines.first).toBe("* busy · Locate auth flow");
+    expect(lines.first).toBe("L1 · * busy · Locate auth flow");
     expect(lines.second).toContain("grep 8s ago");
     expect(lines.second).toContain("dur 2m");
     expect(displayWidth(lines.second!)).toBeLessThanOrEqual(40);
@@ -274,6 +298,154 @@ describe("identity and model resolution", () => {
       ]),
     ).toEqual({ providerID: "xai", id: "grok" });
     expect(resolveSessionModel(undefined, [])).toBeUndefined();
+  });
+});
+
+describe("depth resolution", () => {
+  // A flat "stored session" fixture: every level resolves through the chain.
+  const nested: readonly ChainEntry[] = [
+    { id: "l1", parentID: "root" },
+    { id: "l2", parentID: "l1" },
+    { id: "l3", parentID: "l2" },
+    ...Array.from({ length: 12 }, (_, index) => ({
+      id: `deep-${index + 1}`,
+      parentID: index === 0 ? "root" : `deep-${index}`,
+    })),
+  ];
+
+  test("direct children are L1 and the rendered root itself is L0", () => {
+    expect(resolveDepth("root", { id: "l1", parentID: "root" }, chain([]))).toBe(1);
+    expect(resolveDepth("root", { id: "root" }, chain([]))).toBe(0);
+  });
+
+  test("nested and deeply nested sessions count the parent chain", () => {
+    const lookup = chain(nested);
+    expect(resolveDepth("root", { id: "l2", parentID: "l1" }, lookup)).toBe(2);
+    expect(resolveDepth("root", { id: "l3", parentID: "l2" }, lookup)).toBe(3);
+    expect(resolveDepth("root", { id: "deep-12", parentID: "deep-11" }, lookup)).toBe(12);
+  });
+
+  test("depth follows the chain, not creation order", () => {
+    // `first-created` was created before its own parent but sits one level deeper.
+    const lookup = chain([
+      { id: "first-created", parentID: "second" },
+      { id: "second", parentID: "root" },
+    ]);
+    expect(resolveDepth("root", { id: "first-created", parentID: "second" }, lookup)).toBe(2);
+    expect(resolveDepth("root", { id: "second", parentID: "root" }, lookup)).toBe(1);
+  });
+
+  test("a missing ancestor, an orphan and cycles stay unresolved", () => {
+    // A parent the store has no record for (unsynced or deleted).
+    expect(resolveDepth("root", { id: "gap", parentID: "gone" }, chain([]))).toBeUndefined();
+    // An orphan with no parent metadata at all.
+    expect(resolveDepth("root", { id: "orphan" }, chain([]))).toBeUndefined();
+    // A self-referencing session.
+    expect(resolveDepth("root", { id: "self", parentID: "self" }, chain([]))).toBeUndefined();
+    // A detached cycle that never reaches the root.
+    const cyclic = chain([
+      { id: "a", parentID: "b" },
+      { id: "b", parentID: "a" },
+    ]);
+    expect(resolveDepth("root", { id: "b", parentID: "a" }, cyclic)).toBeUndefined();
+  });
+
+  test("a chain longer than MAX_DEPTH is rejected instead of walked forever", () => {
+    const overlong: ChainEntry[] = Array.from({ length: MAX_DEPTH + 1 }, (_, index) => ({
+      id: `n-${index}`,
+      parentID: index === 0 ? "root" : `n-${index - 1}`,
+    }));
+    const lookup = chain(overlong);
+    expect(
+      resolveDepth("root", { id: `n-${MAX_DEPTH}`, parentID: `n-${MAX_DEPTH - 1}` }, lookup),
+    ).toBeUndefined();
+    expect(
+      resolveDepth("root", { id: `n-${MAX_DEPTH - 1}`, parentID: `n-${MAX_DEPTH - 2}` }, lookup),
+    ).toBe(MAX_DEPTH);
+  });
+
+  test("depthLabel renders every level and the L? fallback", () => {
+    expect(depthLabel(1)).toBe("L1");
+    expect(depthLabel(2)).toBe("L2");
+    expect(depthLabel(12)).toBe("L12");
+    expect(depthLabel(undefined)).toBe("L?");
+  });
+});
+
+describe("depth prefix", () => {
+  const busy = { label: "grep", observedAt: NOW - 8_000 };
+
+  test("active and completed rows keep the level as their first field", () => {
+    const active = record({
+      id: "busy",
+      status: "busy",
+      title: "Locate auth flow",
+      depth: 1,
+      timing: { startedAt: NOW - 120_000 },
+    });
+    expect(rowLines(active, undefined, 40, NOW, busy).first).toBe("L1 · * busy · Locate auth flow");
+
+    const settled = record({
+      id: "idle",
+      status: "idle",
+      title: "Review diff",
+      depth: 2,
+      timing: { startedAt: NOW - 43_000, endedAt: NOW },
+    });
+    expect(rowLines(settled, undefined, 40, NOW).first).toBe("L2 · - idle · Review diff");
+  });
+
+  test("a multi-digit level and an unresolved level stay compact", () => {
+    const deep = record({ id: "deep", status: "busy", title: "Nested investigation", depth: 12 });
+    expect(rowLines(deep, undefined, 40, NOW).prefix).toBe("L12 · * busy · ");
+
+    // Unresolved ancestry must never be presented as a wrong level.
+    const unknown = {
+      ...record({ id: "unknown", status: "busy", title: "Nested" }),
+      depth: undefined,
+    };
+    expect(rowLines(unknown, undefined, 40, NOW).prefix).toBe("L? · * busy · ");
+  });
+
+  test("the status and title survive when the panel cannot fit the level", () => {
+    const child = record({
+      id: "narrow",
+      status: "busy",
+      title: "a very long subagent title that must truncate",
+      depth: 1,
+      timing: { startedAt: NOW - 1_000 },
+    });
+    const lines = rowLines(child, undefined, 12, NOW, busy);
+    // Depth yields first: the status word and the title are the load-bearing fields.
+    expect(lines.first.startsWith("* busy · ")).toBe(true);
+    expect(lines.first).not.toContain("L1");
+    for (const value of [lines.first, lines.second, lines.third]) {
+      if (value) expect(displayWidth(value)).toBeLessThanOrEqual(12);
+    }
+  });
+
+  test("every width keeps rows bounded and prefers the level when it fits", () => {
+    for (const depth of [1, 12, undefined]) {
+      const child = {
+        ...record({
+          id: "scan",
+          status: "busy",
+          title: "Scan the repository for regressions",
+          timing: { startedAt: NOW - 1_000 },
+        }),
+        depth,
+      };
+      for (let width = 1; width <= 44; width += 1) {
+        const lines = rowLines(child, undefined, width, NOW, busy);
+        expect(displayWidth(lines.first)).toBeLessThanOrEqual(width);
+        if (lines.second) expect(displayWidth(lines.second)).toBeLessThanOrEqual(width);
+        if (lines.third) expect(displayWidth(lines.third)).toBeLessThanOrEqual(width);
+      }
+      // At a comfortable width the level leads the row.
+      expect(rowLines(child, undefined, 44, NOW, busy).prefix).toBe(
+        `${depthLabel(depth)} · * busy · `,
+      );
+    }
   });
 });
 

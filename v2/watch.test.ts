@@ -489,3 +489,87 @@ describe("V2 controller reconnect", () => {
     expect(harness.subscriptionCount()).toBe(0);
   });
 });
+
+describe("V2 controller depth", () => {
+  test("records carry the level resolved from the parent chain", async () => {
+    const harness = createHarness();
+    harness.addSession({ id: "child-1", parentID: "parent", title: "Child" }, "running");
+    const { watch, dispose } = mountWatch(harness, "parent");
+    await tick();
+
+    expect(watch.records().map((record) => [record.session.id, record.depth])).toEqual([
+      ["child-1", 1],
+    ]);
+
+    dispose();
+  });
+
+  test("a hydrated child keeps its level once the store restores it", async () => {
+    const harness = createHarness();
+    // Known to the host index but not yet in the store: the panel can only show
+    // it after the bounded hydration run, and it must then be resolved.
+    harness.unsynced({ id: "late-1", parentID: "parent", title: "Late child" });
+    const { watch, dispose } = mountWatch(harness, "parent");
+    await tick();
+    await tick();
+
+    expect(harness.syncCalls).toEqual(["late-1"]);
+    expect(watch.records().map((record) => [record.session.id, record.depth])).toEqual([
+      ["late-1", 1],
+    ]);
+
+    dispose();
+  });
+
+  test("live status and activity events keep the level intact", async () => {
+    const harness = createHarness();
+    harness.addSession({ id: "child-1", parentID: "parent", title: "Child" }, "running");
+    const { watch, dispose } = mountWatch(harness, "parent");
+    await tick();
+    const depthOf = (): number | undefined =>
+      watch.records().find((record) => record.session.id === "child-1")?.depth;
+    expect(depthOf()).toBe(1);
+
+    harness.emit({
+      id: "evt-tool",
+      created: 10,
+      type: "session.tool.input.started",
+      data: { sessionID: "child-1", assistantMessageID: "m1", id: "call-1", name: "grep" },
+    });
+    await tick();
+    expect(watch.activities().has("child-1")).toBe(true);
+    expect(depthOf()).toBe(1);
+
+    harness.setStatus("child-1", "idle");
+    await tick();
+    expect(watch.records()[0]?.status).toBe("idle");
+    expect(depthOf()).toBe(1);
+
+    harness.setStatus("child-1", "running");
+    await tick();
+    expect(watch.records()[0]?.status).toBe("busy");
+    expect(depthOf()).toBe(1);
+
+    dispose();
+  });
+
+  test("a parent change re-resolves levels for the new parent", async () => {
+    const harness = createHarness();
+    harness.addSession({ id: "child-a", parentID: "parent-a", title: "Child A" });
+    harness.addSession({ id: "child-b", parentID: "parent-b", title: "Child B" });
+    const { watch, parent, dispose } = mountWatch(harness, "parent-a");
+    await tick();
+    expect(watch.records().map((record) => [record.session.id, record.depth])).toEqual([
+      ["child-a", 1],
+    ]);
+
+    parent("parent-b");
+    await tick();
+    await tick();
+    expect(watch.records().map((record) => [record.session.id, record.depth])).toEqual([
+      ["child-b", 1],
+    ]);
+
+    dispose();
+  });
+});

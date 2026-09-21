@@ -29,6 +29,7 @@ import {
   observeActivity,
   pruneActivity,
   pruneRecord,
+  resolveDepth,
   sortAndPrune,
   summarize,
   type ActivityMap,
@@ -141,6 +142,11 @@ export function createSubagentWatch(
 
   const children = createMemo(() => directChildren(context, parent()));
   const running = createMemo(() => runningSessions(context, children()));
+  // Depth is re-derived from the live session store on every record rebuild, so
+  // a row keeps its level across live events and store re-hydration, and an
+  // unresolvable chain degrades to `L?` (never to a wrong level).
+  const lookupSession = (sessionID: string): SubagentSession | undefined =>
+    context.data.session.get(sessionID);
   const records = createMemo<SubagentRecord[]>(() =>
     children().map((session) => ({
       session,
@@ -151,6 +157,7 @@ export function createSubagentWatch(
       }),
       timing: timings()[session.id],
       errorAt: errors()[session.id],
+      depth: resolveDepth(parent(), session, lookupSession),
     })),
   );
   const list = createMemo(() => sortAndPrune(records()));

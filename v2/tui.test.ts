@@ -103,6 +103,10 @@ describe("V2 rendering and tracking", () => {
       expect(frame).toContain("▼ Subagents · 1 active · 2 total");
       expect(frame).toContain("* busy · Locate auth flow");
       expect(frame).toContain("- idle · Review diff");
+      // Every row leads with the nesting level resolved from the parent chain:
+      // these are direct children of the rendered session, so they are L1.
+      expect(frame).toContain("L1 · * busy · Locate auth flow");
+      expect(frame).toContain("L1 · - idle · Review diff");
       // The adapter asked the host for this parent's children, newest first,
       // with a finite page size.
       expect(harness.listInputs).toContainEqual({ parentID: "parent", order: "desc", limit: 50 });
@@ -191,7 +195,8 @@ describe("V2 rendering and tracking", () => {
     try {
       const frame = await setup.waitForFrame((value) => value.includes("Late subagent"));
       expect(harness.syncCalls).toContain("late-1");
-      expect(frame).toContain("- idle · Late subagent");
+      // Restored from the host store by hydration, and still resolved to L1.
+      expect(frame).toContain("L1 · - idle · Late subagent");
     } finally {
       setup.renderer.destroy();
     }
@@ -574,6 +579,10 @@ describe("V2 absent and narrow rendering", () => {
       const frame = await setup.waitForFrame((value) => value.includes("busy"));
       expect(frame).not.toContain(title);
       expect(frame).toContain("…");
+      // At this width the level yields to the status and title, so the row
+      // stays readable instead of collapsing to a bare prefix.
+      expect(frame).toContain("* busy ·");
+      expect(frame).not.toContain("L1");
 
       const captured = setup.captureSpans();
       for (const line of captured.lines) {

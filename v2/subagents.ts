@@ -13,6 +13,10 @@
  * logic is kept here. Terminal width helpers stay shared with V1
  * (`src/terminal-text.ts`), so every rendered line is bounded by measured
  * display width in both runtimes.
+ *
+ * One addition has no V1 counterpart: every row carries the nesting depth
+ * (`resolveDepth`) below the rendered session, resolved from the stored parent
+ * chain, and `rowLines` renders it as a compact `L1` / `L2` / `L?` prefix.
  */
 import { displayWidth, sanitizeText, truncateWidth } from "../src/terminal-text.ts";
 
@@ -52,10 +56,59 @@ export type SubagentRecord = {
   status: DisplayStatus;
   timing?: RunTiming;
   errorAt?: number;
+  /**
+   * Nesting depth below the rendered root session, derived from the session
+   * parent chain (`resolveDepth`). `undefined` renders as `L?`.
+   */
+  depth?: number;
 };
 
 export function isActive(status: DisplayStatus): boolean {
   return status === "busy" || status === "retry";
+}
+
+/** Reads a stored session by id, exactly like the host reactive store. */
+export type SessionLookup = (sessionID: string) => SubagentSession | undefined;
+
+/** Bound on parent-chain walking; a longer chain is treated as unresolvable. */
+export const MAX_DEPTH = 32;
+
+/** `L1`…`Ln` for a resolved level, or `L?` when ancestry is unresolved. */
+export function depthLabel(depth: number | undefined): string {
+  return depth === undefined ? "L?" : `L${depth}`;
+}
+
+/**
+ * Depth of `session` below the rendered root, from the session *parent chain*
+ * rather than creation order: a direct child of `rootID` is `1`, its child is
+ * `2`, and `rootID` itself is `0`.
+ *
+ * A chain that never reaches `rootID` is unresolvable and returns `undefined`
+ * so the row renders `L?` instead of a plausible-looking wrong level. That
+ * covers a missing ancestor (the store has no record for it, e.g. an
+ * unsynced or deleted session), an orphan without `parentID`, and a cycle.
+ * A self-referencing or detached cycle is caught by the visited set, and a
+ * chain longer than `MAX_DEPTH` is rejected rather than walked forever.
+ */
+export function resolveDepth(
+  rootID: string,
+  session: Pick<SubagentSession, "id" | "parentID">,
+  lookup: SessionLookup,
+): number | undefined {
+  if (session.id === rootID) return 0;
+  const visited = new Set<string>([session.id]);
+  let current: Pick<SubagentSession, "id" | "parentID"> = session;
+  for (let depth = 1; depth <= MAX_DEPTH; depth += 1) {
+    const parentID = current.parentID;
+    if (!parentID) return undefined;
+    if (parentID === rootID) return depth;
+    if (visited.has(parentID)) return undefined;
+    visited.add(parentID);
+    const parent = lookup(parentID);
+    if (!parent) return undefined;
+    current = parent;
+  }
+  return undefined;
 }
 
 /**
@@ -284,6 +337,7 @@ export function headerSegments(
 
 export type RowLines = {
   first: string;
+  /** Status symbol, status word and depth label, i.e. everything before the title. */
   prefix: string;
   title: string;
   second?: string;
@@ -394,10 +448,18 @@ export function rowLines(
     idle: "-",
   };
   const fullTitle = displayTitle(child.session);
+  const depthPrefix = `${depthLabel(child.depth)} · `;
   const statusPrefix = `${symbol[status]} ${status}`;
-  const fullPrefix = `${symbol[status]} ${status} · `;
+  const statusFullPrefix = `${statusPrefix} · `;
+  // The depth leads the row, but it is dropped before the status when the panel
+  // is too narrow for both: status and title are the load-bearing fields, and
+  // this keeps narrow rendering identical to the un-prefixed layout.
+  const keepDepth = displayWidth(depthPrefix) + displayWidth(statusFullPrefix) < width;
+  const fullPrefix = keepDepth ? `${depthPrefix}${statusFullPrefix}` : statusFullPrefix;
   const showTitle = !!fullTitle && displayWidth(fullPrefix) < width;
-  const prefix = showTitle ? fullPrefix : truncateWidth(statusPrefix, width);
+  const prefix = showTitle
+    ? fullPrefix
+    : truncateWidth(keepDepth ? `${depthPrefix}${statusPrefix}` : statusPrefix, width);
   const title = showTitle ? truncateWidth(fullTitle, width - displayWidth(fullPrefix)) : "";
   const first = prefix + title;
   const agent = sanitizeText(child.session.agent ?? "");
