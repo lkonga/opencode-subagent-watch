@@ -112,6 +112,17 @@ describe("V2 package contract", () => {
     expect(existsSync(join(root, "v2/dist/tui.js"))).toBe(true);
   });
 
+  test("matches V1's collapse key semantics and default", async () => {
+    const v2 = await import("./collapse.ts");
+    // V1 stores a flat boolean under `opencode-subagent-watch.collapsed`; the V2
+    // host namespaces every plugin key as `plugin.<pluginId>.<key>` and requires
+    // an object value, so the matched thing is the semantic key and the default,
+    // not the on-disk byte shape.
+    expect(v2.COLLAPSED_KEY).toBe("collapsed");
+    expect(v2.DEFAULT_COLLAPSED).toBe(true);
+    expect(v2.COLLAPSED_INITIAL).toEqual({ collapsed: true });
+  });
+
   test("the built artifact dynamically imports and exposes { id, setup }", async () => {
     const loaded = (await import("./dist/tui.js")) as { default?: Plugin.Definition };
     expect(loaded.default).toBeDefined();

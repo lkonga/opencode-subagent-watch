@@ -19,9 +19,12 @@ import {
   formatDuration,
   headerLine,
   headerSegments,
+  LIST_LIMIT,
   MAX_DEPTH,
   observeActivity,
+  outlineRecords,
   pruneActivity,
+  pruneList,
   pruneRecord,
   resolveDepth,
   resolveSessionModel,
@@ -39,6 +42,8 @@ const NOW = 1_000_000;
 
 function record(input: {
   id: string;
+  /** Defaults to the rendered session, i.e. a direct child. */
+  parentID?: string;
   status?: DisplayStatus;
   created?: number;
   updated?: number;
@@ -53,7 +58,7 @@ function record(input: {
   return {
     session: {
       id: input.id,
-      parentID: "parent",
+      parentID: input.parentID ?? "parent",
       title: input.title ?? input.id,
       agent: input.agent ?? "explore",
       model: { providerID: "openrouter", id: "deepseek-v3.2" },
@@ -458,5 +463,104 @@ describe("formatting", () => {
     expect(formatCost(0)).toBeUndefined();
     expect(formatCost(0.003)).toBe("$0.0030");
     expect(formatCost(1.234)).toBe("$1.23");
+  });
+});
+
+describe("outline ordering", () => {
+  const nested = (): SubagentRecord[] => [
+    record({ id: "child", parentID: "root", depth: 1 }),
+    record({ id: "grand-a", parentID: "child", depth: 2 }),
+    record({ id: "grand-b", parentID: "child", depth: 2, status: "busy" }),
+    record({ id: "great", parentID: "grand-b", depth: 3 }),
+    record({ id: "sibling", parentID: "root", depth: 1, status: "busy" }),
+  ];
+
+  test("every row is followed by its own descendants, depth-first", () => {
+    expect(outlineRecords(nested(), "root").map((row) => [row.session.id, row.depth])).toEqual([
+      ["sibling", 1],
+      ["child", 1],
+      ["grand-b", 2],
+      ["great", 3],
+      ["grand-a", 2],
+    ]);
+  });
+
+  test("siblings keep the flat sortRecords order at every level", () => {
+    const rows = nested();
+    expect(outlineRecords(rows, "root").map((row) => row.session.id)).toEqual([
+      "sibling",
+      "child",
+      "grand-b",
+      "great",
+      "grand-a",
+    ]);
+  });
+
+  test("equal-status siblings tie-break by id so the outline is stable", () => {
+    const rows = [
+      record({ id: "b", parentID: "root", depth: 1 }),
+      record({ id: "a", parentID: "root", depth: 1 }),
+    ];
+    expect(outlineRecords(rows, "root").map((row) => row.session.id)).toEqual(["a", "b"]);
+  });
+
+  test("an unresolved record is excluded instead of given a false level", () => {
+    const rows = [
+      record({ id: "child", parentID: "root", depth: 1 }),
+      // A parent the store has no record for.
+      record({ id: "gap", parentID: "gone", depth: undefined }),
+      // An orphan with no parent metadata at all.
+      record({ id: "orphan", parentID: undefined, depth: undefined }),
+    ];
+    expect(outlineRecords(rows, "root").map((row) => row.session.id)).toEqual(["child"]);
+  });
+
+  test("a detached cycle never reaches the root, so it is never rendered", () => {
+    const rows = [
+      record({ id: "a", parentID: "b", depth: undefined }),
+      record({ id: "b", parentID: "a", depth: undefined }),
+      record({ id: "child", parentID: "root", depth: 1 }),
+    ];
+    expect(outlineRecords(rows, "root").map((row) => row.session.id)).toEqual(["child"]);
+  });
+
+  test("a record that reappears below its own descendant is rendered once", () => {
+    // root → a → b, and `a` again under `b`: the walk must reject the repeat.
+    const rows = [
+      record({ id: "a", parentID: "root", depth: 1 }),
+      record({ id: "b", parentID: "a", depth: 2 }),
+      record({ id: "a", parentID: "b", depth: 3 }),
+    ];
+    expect(outlineRecords(rows, "root").map((row) => row.session.id)).toEqual(["a", "b"]);
+  });
+
+  test("the walk stops at MAX_DEPTH", () => {
+    const rows = Array.from({ length: MAX_DEPTH + 4 }, (_, index) =>
+      record({
+        id: `n-${index}`,
+        parentID: index === 0 ? "root" : `n-${index - 1}`,
+        depth: index + 1,
+      }),
+    );
+    expect(outlineRecords(rows, "root")).toHaveLength(MAX_DEPTH);
+  });
+
+  test("bounds the rendered page and reports the rest as omitted", () => {
+    const rows = Array.from({ length: LIST_LIMIT + 2 }, (_, index) =>
+      record({ id: `child-${index}`, parentID: "root", depth: 1 }),
+    );
+    const list = pruneList(outlineRecords(rows, "root"));
+    expect(list.visible).toHaveLength(LIST_LIMIT);
+    expect(list.omitted).toBe(2);
+  });
+
+  test("truncation keeps a parent ahead of its descendants", () => {
+    const rows = [
+      record({ id: "child", parentID: "root", depth: 1 }),
+      record({ id: "grand", parentID: "child", depth: 2 }),
+    ];
+    const page = pruneList(outlineRecords(rows, "root"), 1);
+    expect(page.visible.map((row) => row.session.id)).toEqual(["child"]);
+    expect(page.omitted).toBe(1);
   });
 });

@@ -23,6 +23,27 @@
  * store. The pure display model lives in `./subagents.ts`; per-view
  * subscriptions, bounded hydration and per-view state live in `./watch.ts`;
  * durable collapse state lives in `./collapse.ts`.
+ *
+ * Placement parity: V1 registers the `sidebar_content` slot with numeric
+ * `order: 60` (`src/sidebar-state.ts:4`, `src/tui.tsx:301-304`), which renders
+ * after Token Cache (55) and before core Todo (400). V2 has no numeric order —
+ * a claim is exactly one of `prepend`/`append`/`before`/`after`/`replace`
+ * (packages/plugin/src/tui/context.ts:224-262) and contributions render in
+ * plugin enable order with no sort (packages/tui/src/plugin/structure.ts:60-147).
+ * V2 2.0.11 also has no core Todo and no Token Cache sidebar section: the only
+ * `sidebar.content` built-ins are `feature-plugins/sidebar/{context,mcp}.tsx`
+ * (packages/tui/src/plugin/builtins.ts:15-31). `append: "sidebar.content"` from
+ * a plugin enabled last is therefore the closest stable position — last section,
+ * after every built-in — and is what this entrypoint registers. Exact "after
+ * Token Cache, before Todo" ordering is not expressible through the V2 API;
+ * `prepend` would move the panel ahead of the built-ins and `replace` would
+ * suppress them.
+ *
+ * `session.sidebar` is NOT used: V2's `"auto" | "hide"` value controls the whole
+ * sidebar pane (packages/tui/src/config/index.tsx:147-148,
+ * packages/tui/src/component/session-frame.tsx:107-116, which also forces the
+ * sidebar off for any session with a `parentID`), not this plugin's panel.
+ * Collapse stays plugin-owned, exactly like V1.
  */
 import { Plugin } from "@opencode/plugin/tui";
 import type { BoxRenderable, RGBA } from "@opentui/core";
@@ -46,6 +67,15 @@ import {
 /** Stable plugin id; also the diagnostics identity for this entrypoint. */
 export const PLUGIN_ID = "opencode-subagent-watch-v2-tui";
 export { COLLAPSED_INITIAL, COLLAPSED_KEY, DEFAULT_COLLAPSED };
+
+/** The V2 sidebar slot this panel occupies; the only sidebar content path. */
+export const SIDEBAR_SLOT = "sidebar.content";
+/**
+ * Placement kind for `SIDEBAR_SLOT`. V2 has no numeric order, so `append` is
+ * the closest stable match for V1's `order: 60`: when this plugin is enabled
+ * last it is the final sidebar section, after every built-in.
+ */
+export const SIDEBAR_PLACEMENT = "append";
 
 function theme(api: Plugin.Context): {
   text: RGBA;
@@ -92,7 +122,6 @@ function View(props: {
   // bounded hydration run, and every per-view map, and is disposed with the
   // view (or explicitly through `watch.dispose()`).
   const watch = createSubagentWatch(api, () => props.sessionID);
-  const children = watch.children;
   const list = watch.list;
   const summary = watch.summary;
   const loadState = watch.loadState;
@@ -177,7 +206,7 @@ function View(props: {
         <Show when={loadState() === "unavailable"}>
           <text fg={theme(api).error}>{truncateWidth("  Subagents unavailable", width())}</text>
         </Show>
-        <Show when={loadState() === "ready" && children().length === 0}>
+        <Show when={loadState() === "ready" && list().visible.length === 0}>
           <text fg={theme(api).subdued}>{truncateWidth("  No subagents", width())}</text>
         </Show>
 
@@ -267,7 +296,7 @@ const tuiWatchPlugin: Plugin.Definition = {
     const { collapsed, toggle } = createCollapsedToggle(context);
 
     context.ui.slot({
-      append: "sidebar.content",
+      append: SIDEBAR_SLOT,
       render: (input) => (
         <View context={context} sessionID={input.sessionID} collapsed={collapsed} toggle={toggle} />
       ),

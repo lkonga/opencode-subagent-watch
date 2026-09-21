@@ -11,24 +11,48 @@ the panel renders after Token Cache (order 55) and still before core Todo
 (order 400): Token Cache → Subagents → Todo. V1 also renders Context (100), MCP
 (200) and LSP (300) between them.
 
-V2 placement is stricter and has no numeric order. `sidebar.content` is a single
-slot, so position is decided by **plugin enable order** — the `cli.json`
-`plugins` array. Registering this plugin last makes its
-`append: "sidebar.content"` claim the final append contribution, i.e. after
-Token Cache. V2 2.0.11 has **no core Todo sidebar section at all** (only
-`feature-plugins/sidebar/{context,mcp,footer}.tsx`), so "before Todo" is
-vacuous in V2; the only guarantee there is "after Token Cache, last append".
+V2 placement is stricter and has no numeric order. A claim is exactly one of
+`prepend` / `append` / `before` / `after` / `replace`
+(`packages/plugin/src/tui/context.ts:224-262`) and contributions render in
+**plugin enable order** with no sort at all
+(`packages/tui/src/plugin/structure.ts:60-147`). The only sidebar slot paths are
+`sidebar.content` and `sidebar.footer` (`packages/plugin/src/tui/context.ts:191-203`),
+so `before`/`after` cannot position anything _inside_ `sidebar.content`.
+
+This entrypoint registers `append: "sidebar.content"` and nothing else, and it
+must be enabled last in the `cli.json` `plugins` array. That makes the panel the
+**final sidebar section, after every built-in** — the closest stable position to
+V1's `order: 60`. Exact parity is not expressible through the V2 API:
+
+- V1 renders Token Cache (55) → Subagents (60) → core Todo (400). **V2 2.0.11 has
+  neither section**: the only `sidebar.content` built-ins are
+  `feature-plugins/sidebar/{context,mcp}.tsx` (`packages/tui/src/plugin/builtins.ts:15-31`).
+  So "after Token Cache, before Todo" has no V2 referent; all that survives is
+  "after the built-in content sections".
+- `prepend` would move the panel _ahead_ of the built-ins (further from V1), and
+  `replace` would suppress them entirely.
+- An unknown slot path degrades by appending to the nearest surviving ancestor
+  (`packages/tui/src/plugin/structure.ts:126-140`), so there is no side door into
+  an earlier position either.
+
+The panel's own collapse is **not** wired to `session.sidebar`. V2's
+`session.sidebar` is `"auto" | "hide"` and controls the whole sidebar pane, not a
+plugin section (`packages/tui/src/config/index.tsx:147-148`, consumed at
+`packages/tui/src/component/session-frame.tsx:107-116`, which also forces the
+sidebar off for any session that has a `parentID`). Writing it from a plugin
+would hide the entire sidebar instead of collapsing this panel, so the panel
+keeps its V1 header-click toggle.
 
 ## Canonical lineage
 
 The canonical implementation of this V2 port lives in the
-`wt/custom/feat/v2-sidebar-parity` worktree
-(`.worktrees/sidebar-parity`, branch `wt/custom/feat/v2-sidebar-parity`). It
-supersedes the earlier issue-230 prototype on
-`wt/v2/feat/issue-230-subagent-watch` (commits `bc3424d`, `7e977a6`, `6c66681`);
-those prototype commits are historical only and this worktree is the lineage to
-build, test, and ship from. This note does not claim that the prototype branch
-has been deleted or merged.
+`wt/custom/feat/issue-2-depth` worktree (`.worktrees/issue-2-depth`, branch
+`wt/custom/feat/issue-2-depth`), landed into `custom`. It supersedes both the
+earlier issue-230 prototype on `wt/v2/feat/issue-230-subagent-watch` (commits
+`bc3424d`, `7e977a6`, `6c66681`) and the `wt/custom/feat/v2-sidebar-parity`
+worktree (`.worktrees/sidebar-parity`, commit `4b2fdb0`), which carried the same
+V2 port without the depth-prefix work; those commits are historical only. This
+note does not claim that the superseded branches have been deleted or merged.
 
 ## Files
 
@@ -94,9 +118,12 @@ calls — it is not a complete mirror of the upstream API.
 ## State
 
 - Plugin id: `opencode-subagent-watch-v2-tui`
-- Storage key: `sidebar-collapsed.v1`, initial `{ collapsed: true }` — separate
-  from the V1 `opencode-subagent-watch.collapsed`, so the runtimes never fight
-  over one value.
+- Storage key: `collapsed`, initial `{ collapsed: true }` — the same _semantic_
+  key, default and restore rule as V1's `opencode-subagent-watch.collapsed`. The
+  host namespaces it as `plugin.opencode-subagent-watch-v2-tui.collapsed` and V2
+  durable storage is object-valued (`Store<Value extends object>`), so the two
+  runtimes cannot share one on-disk value; the name and semantics are matched,
+  not the byte shape, and each runtime owns its own state.
 - Only `typeof state.collapsed === "boolean"` is accepted. A missing or
   malformed persisted value renders collapsed and is left untouched; startup
   never writes a default over it.
@@ -135,6 +162,31 @@ calls — it is not a complete mirror of the upstream API.
 - Event-driven activity, error and retry marks only apply to direct children of
   the currently rendered parent; `session.created` only triggers a refresh when
   `event.data.parentID` matches that parent.
+- The panel renders the rendered root's **whole synced subtree** as an outline,
+  not just its direct children. `familyDescendants` walks the host's root-keyed
+  family index (`packages/client/src/solid/data.ts:109-112, 514-541`) and
+  `outlineRecords` (`v2/subagents.ts`) places each row under its parent with its
+  true recursive level, so a nested descendant shows `L2`/`L3` instead of
+  inheriting `L1`. Siblings at every level keep the V1 sort order
+  (running → errors → settled, with the same tie-breakers), and the page stays
+  bounded by `LIST_LIMIT = 5`.
+  - A row whose ancestry never reaches the rendered root — an orphan without
+    `parentID`, a record whose parent the store does not have, or a cycle — is
+    **excluded** from the outline rather than placed at a fabricated level. The
+    `L?` label remains the display model's defensive fallback for an unresolved
+    depth (`depthLabel(undefined)`), but the controller never renders one.
+  - Direct-child semantics are unchanged: ownership, event marks and the
+    activity/error/retry maps are still keyed to direct children
+    (`isDirectChild`), and hydration still fetches the finite direct-children
+    page. A nested descendant that the host has not synced (e.g. a tree resumed
+    from before this TUI session) is therefore not rendered until the host loads
+    it; the host syncs every session on `session.created`
+    (`packages/client/src/solid/data.ts:631-634`), so live trees fill in.
+  - Event-driven marks are not derived for nested rows. Their status comes from
+    the host store (`data.session.status`), which is correct at any depth, but
+    `error`/`retry`/activity labels remain direct-child features.
+- V2 has no host-provided collapsible section primitive, so the header toggle is
+  hand-rolled exactly like V1 (`onMouseUp` on the header box).
 
 ## Building and testing
 

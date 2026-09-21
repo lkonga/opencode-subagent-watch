@@ -17,6 +17,9 @@
  * One addition has no V1 counterpart: every row carries the nesting depth
  * (`resolveDepth`) below the rendered session, resolved from the stored parent
  * chain, and `rowLines` renders it as a compact `L1` / `L2` / `L?` prefix.
+ * `outlineRecords` turns those depth-annotated records into the rendered
+ * outline, so a nested descendant keeps its true level instead of all rows
+ * collapsing to `L1`.
  */
 import { displayWidth, sanitizeText, truncateWidth } from "../src/terminal-text.ts";
 
@@ -249,11 +252,19 @@ export type SubagentList = {
   omitted: number;
 };
 
+/** Maximum rows the panel renders before the rest are reported as omitted. */
+export const LIST_LIMIT = 5;
+
 function byID(left: SubagentRecord, right: SubagentRecord): number {
   return left.session.id.localeCompare(right.session.id);
 }
 
-export function sortAndPrune(children: Iterable<SubagentRecord>, limit = 5): SubagentList {
+/**
+ * Sibling order, V1-compatible: running rows first (oldest run first), then
+ * errors (most recent error first), then settled rows (most recently updated
+ * first), each tie-broken by session id so the order is stable across rebuilds.
+ */
+export function sortRecords(children: Iterable<SubagentRecord>): SubagentRecord[] {
   const values = [...children];
   const active = values
     .filter((child) => isActive(child.status))
@@ -269,11 +280,64 @@ export function sortAndPrune(children: Iterable<SubagentRecord>, limit = 5): Sub
       (left, right) => right.session.time.updated - left.session.time.updated || byID(left, right),
     );
 
-  const sorted = [...active, ...errors, ...idle];
+  return [...active, ...errors, ...idle];
+}
+
+/** Bounds an already-ordered record list to the rows the panel renders. */
+export function pruneList(records: readonly SubagentRecord[], limit = LIST_LIMIT): SubagentList {
   return {
-    visible: sorted.slice(0, limit),
-    omitted: Math.max(0, sorted.length - limit),
+    visible: records.slice(0, limit),
+    omitted: Math.max(0, records.length - limit),
   };
+}
+
+/** Flat counterpart of `outlineRecords`: sibling order plus the row bound. */
+export function sortAndPrune(children: Iterable<SubagentRecord>, limit = LIST_LIMIT): SubagentList {
+  return pruneList(sortRecords(children), limit);
+}
+
+/**
+ * Orders the rendered root's subtree as an **outline**: every row's own
+ * descendants follow it depth-first, and siblings at every level keep
+ * `sortRecords` order.
+ *
+ * A record is only rendered under its parent, so a record whose ancestry never
+ * reaches `rootID` (`depth === undefined`, e.g. an orphan without `parentID` or
+ * a chain the store cannot resolve) is excluded rather than placed at a level
+ * it does not have.
+ *
+ * The walk cannot loop: in-degree is one (`parentID`), `seen` rejects any row
+ * that still reaches the root more than once (`root → a → b → a`), and
+ * `MAX_DEPTH` bounds the recursion depth even if a future caller passes a
+ * deeper chain.
+ */
+export function outlineRecords(
+  records: Iterable<SubagentRecord>,
+  rootID: string,
+): SubagentRecord[] {
+  const byParent = new Map<string, SubagentRecord[]>();
+  for (const record of records) {
+    if (record.depth === undefined) continue;
+    const parentID = record.session.parentID;
+    if (!parentID) continue;
+    const siblings = byParent.get(parentID);
+    if (siblings) siblings.push(record);
+    else byParent.set(parentID, [record]);
+  }
+
+  const ordered: SubagentRecord[] = [];
+  const seen = new Set<string>([rootID]);
+  const walk = (parentID: string, level: number): void => {
+    if (level > MAX_DEPTH) return;
+    for (const record of sortRecords(byParent.get(parentID) ?? [])) {
+      if (seen.has(record.session.id)) continue;
+      seen.add(record.session.id);
+      ordered.push(record);
+      walk(record.session.id, level + 1);
+    }
+  };
+  walk(rootID, 1);
+  return ordered;
 }
 
 export function formatDuration(timing: RunTiming | undefined, now: number): string | undefined {

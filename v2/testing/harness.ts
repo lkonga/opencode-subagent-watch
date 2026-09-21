@@ -14,10 +14,14 @@
  *     counts (`deferSync`, `releaseSync`, `syncInFlight`, `syncMaxInFlight`);
  *   - `storage.store` mutations can be held open (`deferMutations`), released
  *     out of order, made to fail (`failMutations`), and record what was
- *     actually committed (`storageWrites`).
+ *     actually committed (`storageWrites`);
+ *   - `data.session.family` is the host's *root-keyed* family index, so nested
+ *     descendants are visible without extra syncs, exactly like the real host;
+ *   - `storage.store` caches one entry per key for the harness's lifetime, the
+ *     way the host does, so a second `setup` models a plugin hot reload.
  */
 import { createSignal } from "solid-js";
-import { createStore, produce } from "solid-js/store";
+import { createStore, produce, type Store } from "solid-js/store";
 import { RGBA } from "@opentui/core";
 import type { JSX } from "@opentui/solid";
 import type { Plugin } from "@opencode/plugin/tui";
@@ -152,9 +156,10 @@ export function createHarness(options: HarnessOptions = {}): Harness {
   const [sessions, setSessions] = createStore<{
     byID: Record<string, Plugin.SessionInfo>;
     children: Record<string, string[]>;
+    families: Record<string, string[]>;
     statuses: Record<string, SessionStatus>;
     messages: Record<string, Plugin.SessionMessageInfo[]>;
-  }>({ byID: {}, children: {}, statuses: {}, messages: {} });
+  }>({ byID: {}, children: {}, families: {}, statuses: {}, messages: {} });
 
   const listeners = new Map<Plugin.WatchEventType, Set<(event: Plugin.WatchEvent) => void>>();
   let subscriptions = 0;
@@ -169,6 +174,30 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     time: { created: init.created ?? 1_000, updated: init.updated ?? 1_000 },
   });
 
+  /**
+   * The host keys its family index by the family *root*: walk `parentID` upward
+   * through loaded records, with a seen set, until the furthest known ancestor
+   * (`packages/client/src/solid/data.ts:496-512`).
+   */
+  function resolveRoot(sessionID: string): string {
+    let current = sessionID;
+    const seen = new Set<string>([sessionID]);
+    let parentID = sessions.byID[current]?.parentID;
+    while (parentID !== undefined && !seen.has(parentID)) {
+      seen.add(parentID);
+      current = parentID;
+      parentID = sessions.byID[current]?.parentID;
+    }
+    return current;
+  }
+
+  /** Registers a session under its resolved family root, idempotently. */
+  function indexFamily(rootID: string, sessionID: string): void {
+    setSessions("families", rootID, (current) =>
+      current?.includes(sessionID) ? current : [...(current ?? []), sessionID],
+    );
+  }
+
   const known = new Map<string, SessionInit>();
   const listInputs: ListInput[] = [];
   const syncCalls: string[] = [];
@@ -180,6 +209,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
       setSessions("children", init.parentID, (current) =>
         current?.includes(init.id) ? current : [...(current ?? []), init.id],
       );
+    indexFamily(resolveRoot(init.id), init.id);
     if (status !== "idle") setSessions("statuses", init.id, status);
   }
 
@@ -191,6 +221,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     setSessions("children", parentID, (current) =>
       current?.includes(sessionID) ? current : [...(current ?? []), sessionID],
     );
+    indexFamily(parentID, sessionID);
   }
 
   const data: Plugin.Context["data"] = {
@@ -211,7 +242,15 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     },
     session: {
       get: (sessionID) => sessions.byID[sessionID],
-      family: (sessionID) => sessions.children[sessionID] ?? [],
+      // The host's family index is root-keyed and lists every member; the
+      // explicit `children` bucket is kept so a store-less family entry
+      // (`orphan`) still shows up, exactly like the stale host index case.
+      family: (sessionID) => [
+        ...new Set([
+          ...(sessions.children[sessionID] ?? []),
+          ...(sessions.families[sessionID] ?? []),
+        ]),
+      ],
       status: (sessionID) => sessions.statuses[sessionID] ?? "idle",
       sync: async (sessionID) => {
         syncCalls.push(sessionID);
@@ -297,8 +336,24 @@ export function createHarness(options: HarnessOptions = {}): Harness {
   let mutationError: string | undefined;
   const pendingMutations: Array<() => void> = [];
 
+  /**
+   * One entry per key, like the host (`context/storage.tsx:51-57`): a second
+   * `store` call for the same key — a plugin hot reload — reuses the live value
+   * instead of re-reading a fresh default.
+   */
+  const storageEntries = new Map<
+    string,
+    readonly [Store<object>, (mutation: (draft: never) => void) => Promise<void>]
+  >();
+
   const storage: Plugin.Storage = {
     store<Value extends object>(key: string, input: { readonly initial: Value }) {
+      const cached = storageEntries.get(key);
+      if (cached)
+        return cached as unknown as readonly [
+          Store<Value>,
+          (mutation: (draft: Value) => void) => Promise<void>,
+        ];
       storageKeys.push(key);
       storageInitials.push(input.initial);
       // Only a store whose shape declares `collapsed` is merged with the
@@ -327,7 +382,15 @@ export function createHarness(options: HarnessOptions = {}): Harness {
           });
         });
       };
-      return [state, mutate] as const;
+      const entry = [state, mutate] as const;
+      storageEntries.set(
+        key,
+        entry as unknown as readonly [
+          Store<object>,
+          (mutation: (draft: never) => void) => Promise<void>,
+        ],
+      );
+      return entry;
     },
   };
 

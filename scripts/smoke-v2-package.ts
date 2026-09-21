@@ -150,8 +150,10 @@ try {
   const slots = harness.claims.map((claim) => ("append" in claim ? claim.append : "?"));
   assert(slots.includes("sidebar.content"), "setup did not claim the sidebar.content slot");
   assert(slots.includes("app"), "setup did not claim the app slot");
+  // The plugin's semantic collapse key; the host namespaces it as
+  // `plugin.<pluginId>.collapsed`, matching V1's `opencode-subagent-watch.collapsed`.
   assert(
-    harness.storageKeys.join(",") === "sidebar-collapsed.v1",
+    harness.storageKeys.join(",") === "collapsed",
     `unexpected storage key ${harness.storageKeys.join(",")}`,
   );
   assert(

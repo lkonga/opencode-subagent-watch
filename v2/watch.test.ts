@@ -11,6 +11,7 @@ import { createRoot, createSignal } from "solid-js";
 import {
   createSubagentWatch,
   directChildren,
+  familyDescendants,
   isDirectChild,
   runBounded,
   HYDRATION_CONCURRENCY,
@@ -567,6 +568,119 @@ describe("V2 controller depth", () => {
     await tick();
     await tick();
     expect(watch.records().map((record) => [record.session.id, record.depth])).toEqual([
+      ["child-b", 1],
+    ]);
+
+    dispose();
+  });
+});
+
+describe("V2 controller outline", () => {
+  test("nested descendants carry their own recursive depth", async () => {
+    const harness = createHarness();
+    harness.addSession({ id: "child-1", parentID: "parent", title: "Child" });
+    harness.addSession({ id: "grand-1", parentID: "child-1", title: "Grandchild" });
+    harness.addSession({ id: "great-1", parentID: "grand-1", title: "Great-grandchild" });
+    const { watch, dispose } = mountWatch(harness, "parent");
+    await tick();
+
+    expect(familyDescendants(harness.context, "parent").map((child) => child.id)).toEqual([
+      "child-1",
+      "grand-1",
+      "great-1",
+    ]);
+    expect(watch.list().visible.map((row) => [row.session.id, row.depth])).toEqual([
+      ["child-1", 1],
+      ["grand-1", 2],
+      ["great-1", 3],
+    ]);
+    expect(watch.summary()).toEqual({ total: 3, active: 0, errors: 0 });
+
+    dispose();
+  });
+
+  test("a nested descendant is only ever rendered below its own parent", async () => {
+    const harness = createHarness();
+    harness.addSession({ id: "idle-child", parentID: "parent", title: "Idle child" });
+    harness.addSession(
+      { id: "busy-grand", parentID: "idle-child", title: "Busy grand" },
+      "running",
+    );
+    const { watch, dispose } = mountWatch(harness, "parent");
+    await tick();
+
+    // Sibling order still puts running rows first, but the grandchild stays
+    // under its own parent instead of jumping to the top level.
+    expect(watch.list().visible.map((row) => row.session.id)).toEqual(["idle-child", "busy-grand"]);
+    expect(watch.list().visible.map((row) => row.status)).toEqual(["idle", "busy"]);
+    expect(watch.list().visible.map((row) => row.depth)).toEqual([1, 2]);
+
+    dispose();
+  });
+
+  test("a nested descendant's running status is read from the host store", async () => {
+    const harness = createHarness();
+    harness.addSession({ id: "child-1", parentID: "parent", title: "Child" });
+    harness.addSession({ id: "grand-1", parentID: "child-1", title: "Grand" }, "running");
+    const { watch, dispose } = mountWatch(harness, "parent");
+    await tick();
+
+    expect(watch.records().map((row) => [row.session.id, row.status])).toEqual([
+      ["child-1", "idle"],
+      ["grand-1", "busy"],
+    ]);
+
+    dispose();
+  });
+
+  test("a family member whose parent chain never reaches the root is not rendered", async () => {
+    const harness = createHarness();
+    harness.addSession({ id: "child-1", parentID: "parent", title: "Child" });
+    // Known to the host index but parented elsewhere, so its ancestry can never
+    // resolve against the rendered root.
+    harness.addSession({ id: "stray-1", parentID: "elsewhere", title: "Stray" });
+    harness.orphan("parent", "stray-1");
+    const { watch, dispose } = mountWatch(harness, "parent");
+    await tick();
+
+    expect(watch.descendants().map((child) => child.id)).toEqual(["child-1", "stray-1"]);
+    expect(watch.list().visible.map((row) => row.session.id)).toEqual(["child-1"]);
+    expect(watch.summary()).toEqual({ total: 1, active: 0, errors: 0 });
+
+    dispose();
+  });
+
+  test("a detached cycle is never rendered under the root", async () => {
+    const harness = createHarness();
+    harness.addSession({ id: "child-1", parentID: "parent", title: "Child" });
+    harness.addSession({ id: "cycle-a", parentID: "cycle-b", title: "A" });
+    harness.addSession({ id: "cycle-b", parentID: "cycle-a", title: "B" });
+    const { watch, dispose } = mountWatch(harness, "parent");
+    await tick();
+
+    expect(watch.list().visible.map((row) => row.session.id)).toEqual(["child-1"]);
+    expect(watch.summary()).toEqual({ total: 1, active: 0, errors: 0 });
+
+    dispose();
+  });
+
+  test("a parent change re-resolves the outline for the new parent", async () => {
+    const harness = createHarness();
+    harness.addSession({ id: "child-a", parentID: "parent-a", title: "Child A" });
+    harness.addSession({ id: "grand-a", parentID: "child-a", title: "Grand A" });
+    harness.addSession({ id: "child-b", parentID: "parent-b", title: "Child B" });
+    const { watch, parent, dispose } = mountWatch(harness, "parent-a");
+    await tick();
+
+    expect(watch.list().visible.map((row) => [row.session.id, row.depth])).toEqual([
+      ["child-a", 1],
+      ["grand-a", 2],
+    ]);
+
+    parent("parent-b");
+    await tick();
+    await tick();
+    expect(watch.list().visible.map((row) => [row.session.id, row.depth])).toEqual([
       ["child-b", 1],
     ]);
 

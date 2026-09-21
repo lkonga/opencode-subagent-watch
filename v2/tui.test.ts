@@ -23,7 +23,9 @@ mock.module("@opencode/plugin/tui", () => ({
   },
 }));
 
-const plugin = (await import("./tui.tsx")).default;
+const v2 = await import("./tui.tsx");
+const plugin = v2.default;
+const { SIDEBAR_SLOT, SIDEBAR_PLACEMENT, COLLAPSED_KEY } = v2;
 
 const WIDTH = 40;
 
@@ -74,6 +76,37 @@ describe("V2 plugin definition", () => {
     expect(harness.keymapLayers[0]?.mode).toBe("global");
     expect(harness.keymapLayers[0]?.commands?.[0]?.id).toBe("subagent-watch.toggle");
     expect(harness.keymapLayers[0]?.commands?.[0]?.bind).toBe(false);
+  });
+
+  test("claims exactly one sidebar.content append and no other placement", () => {
+    const harness = setupPlugin();
+    const sidebar = harness.claims.filter(
+      (claim) => "append" in claim && claim.append === SIDEBAR_SLOT,
+    );
+    expect(sidebar).toHaveLength(1);
+    // V2 has no numeric order: a claim is exactly one of
+    // prepend/append/before/after/replace (packages/plugin/src/tui/context.ts:224-262),
+    // so `append` is the closest stable match for V1's `order: 60`. A `prepend`
+    // would render ahead of the built-in sections and `replace` would suppress
+    // them, so neither is a parity option.
+    expect(SIDEBAR_SLOT).toBe("sidebar.content");
+    expect(SIDEBAR_PLACEMENT).toBe("append");
+    expect(Object.keys(sidebar[0]!).toSorted()).toEqual(["append", "render"]);
+    // The host decides position from plugin enable order, so the claim carries
+    // no ordering hint at all.
+    for (const other of ["prepend", "before", "after", "replace"]) {
+      expect(sidebar[0]).not.toHaveProperty(other);
+    }
+  });
+
+  test("reuses the V1 collapse default and its semantic key", () => {
+    const harness = setupPlugin();
+    // V1 owns `order: 60` / `opencode-subagent-watch.collapsed`; V2 matches the
+    // *semantic* key (`collapsed`, namespaced by the host as
+    // `plugin.<pluginId>.collapsed`) and the same `true` default.
+    expect(COLLAPSED_KEY).toBe("collapsed");
+    expect(harness.storageKeys).toEqual(["collapsed"]);
+    expect(harness.storageInitials).toEqual([{ collapsed: true }]);
   });
 });
 
@@ -358,7 +391,7 @@ describe("V2 navigation", () => {
 describe("V2 storage", () => {
   test("uses the deterministic key and initial state", () => {
     const harness = setupPlugin();
-    expect(harness.storageKeys).toEqual(["sidebar-collapsed.v1"]);
+    expect(harness.storageKeys).toEqual(["collapsed"]);
     expect(harness.storageInitials).toEqual([{ collapsed: true }]);
     expect(harness.collapsed()).toBeUndefined();
   });
@@ -383,6 +416,38 @@ describe("V2 storage", () => {
       await setup.waitForFrame((value) => !value.includes("Locate auth flow"));
     } finally {
       setup.renderer.destroy();
+    }
+  });
+
+  test("a hot reload reuses the durable store and never rewrites the default", async () => {
+    const harness = setupPlugin();
+    harness.addSession({ id: "busy-1", parentID: "parent", title: "Locate auth flow" }, "running");
+
+    const first = await mount(harness, "parent");
+    try {
+      const collapsed = await first.waitForFrame((value) => value.includes("▶ Subagents"));
+      await click(first, 4, lineOf(collapsed, "▶ Subagents"));
+      expect(harness.collapsed()).toBe(false);
+      expect(harness.storageWrites).toEqual([false]);
+    } finally {
+      first.renderer.destroy();
+    }
+
+    // The host keeps one store per key, so a second setup (plugin hot reload)
+    // restores what the first one persisted and writes nothing at startup.
+    plugin.setup(harness.context);
+    expect(harness.storageKeys).toEqual(["collapsed"]);
+    expect(harness.storageInitials).toEqual([{ collapsed: true }]);
+    expect(harness.storageWrites).toEqual([false]);
+
+    const reloaded = await mount(harness, "parent");
+    try {
+      const frame = await reloaded.waitForFrame((value) => value.includes("Locate auth flow"));
+      expect(frame).toContain("▼ Subagents");
+      expect(harness.storageWrites).toEqual([false]);
+      expect(harness.collapsed()).toBe(false);
+    } finally {
+      reloaded.renderer.destroy();
     }
   });
 

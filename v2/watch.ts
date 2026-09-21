@@ -18,6 +18,9 @@
  *   - every await re-checks a generation counter, so results from a disposed
  *     view or from a previous parent are dropped instead of committed;
  *   - parent changes reset the load state and prune every per-view map.
+ *   - rendering follows the rendered root's whole synced subtree (`familyDescendants`
+ *     plus `outlineRecords`), while event marks and ownership stay scoped to
+ *     direct children (`isDirectChild`).
  */
 import { createEffect, createMemo, createSignal, onCleanup, type Accessor } from "solid-js";
 import type { Plugin } from "@opencode/plugin/tui";
@@ -27,10 +30,11 @@ import {
   clearSettled,
   displayStatus,
   observeActivity,
+  outlineRecords,
   pruneActivity,
+  pruneList,
   pruneRecord,
   resolveDepth,
-  sortAndPrune,
   summarize,
   type ActivityMap,
   type RunTiming,
@@ -49,6 +53,8 @@ export const HYDRATION_CONCURRENCY = 4;
 
 export type SubagentWatch = {
   readonly children: Accessor<SubagentSession[]>;
+  /** The rendered root's synced subtree, in host family-index order. */
+  readonly descendants: Accessor<SubagentSession[]>;
   readonly records: Accessor<SubagentRecord[]>;
   readonly list: Accessor<SubagentList>;
   readonly summary: Accessor<Summary>;
@@ -69,6 +75,26 @@ export function directChildren(context: Plugin.Context, parentID: string): Subag
   for (const sessionID of context.data.session.family(parentID)) {
     const info = context.data.session.get(sessionID);
     if (info && info.parentID === parentID) result.push(info);
+  }
+  return result;
+}
+
+/**
+ * Every session in the rendered root's family that the host has synced.
+ *
+ * The V2 host keys its family index by the family *root* and lists all members
+ * (`packages/client/src/solid/data.ts:109-112, 514-541`), so a sync is the only
+ * thing a descendant needs to appear here; `parentID` is what places it under
+ * its parent. Members with no store record are skipped, exactly like
+ * `directChildren`, and a member outside the rendered root's subtree is dropped
+ * later by `outlineRecords`.
+ */
+export function familyDescendants(context: Plugin.Context, rootID: string): SubagentSession[] {
+  const result: SubagentSession[] = [];
+  for (const sessionID of context.data.session.family(rootID)) {
+    if (sessionID === rootID) continue;
+    const info = context.data.session.get(sessionID);
+    if (info) result.push(info);
   }
   return result;
 }
@@ -141,14 +167,17 @@ export function createSubagentWatch(
   let reconnectQueued = false;
 
   const children = createMemo(() => directChildren(context, parent()));
-  const running = createMemo(() => runningSessions(context, children()));
+  const descendants = createMemo(() => familyDescendants(context, parent()));
+  // Running status is read for every rendered row, so a nested descendant shows
+  // the host's live status instead of defaulting to idle.
+  const running = createMemo(() => runningSessions(context, descendants()));
   // Depth is re-derived from the live session store on every record rebuild, so
   // a row keeps its level across live events and store re-hydration, and an
   // unresolvable chain degrades to `L?` (never to a wrong level).
   const lookupSession = (sessionID: string): SubagentSession | undefined =>
     context.data.session.get(sessionID);
   const records = createMemo<SubagentRecord[]>(() =>
-    children().map((session) => ({
+    descendants().map((session) => ({
       session,
       status: displayStatus({
         running: running()[session.id] === true,
@@ -160,8 +189,11 @@ export function createSubagentWatch(
       depth: resolveDepth(parent(), session, lookupSession),
     })),
   );
-  const list = createMemo(() => sortAndPrune(records()));
-  const summary = createMemo(() => summarize(records()));
+  // The rendered page is the placed subtree: unplaceable records are excluded,
+  // and the summary counts exactly the rows the page can show.
+  const ordered = createMemo(() => outlineRecords(records(), parent()));
+  const list = createMemo(() => pruneList(ordered()));
+  const summary = createMemo(() => summarize(ordered()));
 
   const current = (run: number): boolean => !disposed && run === generation;
   const isChild = (sessionID: string): boolean => isDirectChild(context, parent(), sessionID);
@@ -302,7 +334,8 @@ export function createSubagentWatch(
   });
 
   createEffect(() => {
-    const keep = new Set(children().map((child) => child.id));
+    // Prune against every rendered row so a nested row keeps its timing; event marks stay direct-child scoped.
+    const keep = new Set(descendants().map((child) => child.id));
     setTimings((previous) => pruneRecord(previous, keep));
     setErrors((previous) => pruneRecord(previous, keep));
     setRetries((previous) => pruneRecord(previous, keep));
@@ -317,5 +350,5 @@ export function createSubagentWatch(
   };
   onCleanup(dispose);
 
-  return { children, records, list, summary, activities, loadState, stale, dispose };
+  return { children, descendants, records, list, summary, activities, loadState, stale, dispose };
 }

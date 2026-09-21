@@ -79,7 +79,7 @@ import { createEffect as createEffect2, createMemo as createMemo2, createSignal 
 
 // v2/collapse.ts
 import { createSignal } from "solid-js";
-var COLLAPSED_KEY = "sidebar-collapsed.v1";
+var COLLAPSED_KEY = "collapsed";
 var DEFAULT_COLLAPSED = true;
 var COLLAPSED_INITIAL = { collapsed: DEFAULT_COLLAPSED };
 function isRecord(value) {
@@ -224,19 +224,52 @@ function resolveSessionModel(session, messages) {
     return session.model;
   return messages.findLast((message) => message.type === "model-switched")?.model;
 }
+var LIST_LIMIT = 5;
 function byID(left, right) {
   return left.session.id.localeCompare(right.session.id);
 }
-function sortAndPrune(children, limit = 5) {
+function sortRecords(children) {
   const values = [...children];
   const active = values.filter((child) => isActive(child.status)).toSorted((left, right) => left.session.time.created - right.session.time.created || byID(left, right));
   const errors = values.filter((child) => child.status === "error").toSorted((left, right) => (right.errorAt ?? 0) - (left.errorAt ?? 0) || byID(left, right));
   const idle = values.filter((child) => child.status === "idle").toSorted((left, right) => right.session.time.updated - left.session.time.updated || byID(left, right));
-  const sorted = [...active, ...errors, ...idle];
+  return [...active, ...errors, ...idle];
+}
+function pruneList(records, limit = LIST_LIMIT) {
   return {
-    visible: sorted.slice(0, limit),
-    omitted: Math.max(0, sorted.length - limit)
+    visible: records.slice(0, limit),
+    omitted: Math.max(0, records.length - limit)
   };
+}
+function outlineRecords(records, rootID) {
+  const byParent = new Map;
+  for (const record of records) {
+    if (record.depth === undefined)
+      continue;
+    const parentID = record.session.parentID;
+    if (!parentID)
+      continue;
+    const siblings = byParent.get(parentID);
+    if (siblings)
+      siblings.push(record);
+    else
+      byParent.set(parentID, [record]);
+  }
+  const ordered = [];
+  const seen = new Set([rootID]);
+  const walk = (parentID, level) => {
+    if (level > MAX_DEPTH)
+      return;
+    for (const record of sortRecords(byParent.get(parentID) ?? [])) {
+      if (seen.has(record.session.id))
+        continue;
+      seen.add(record.session.id);
+      ordered.push(record);
+      walk(record.session.id, level + 1);
+    }
+  };
+  walk(rootID, 1);
+  return ordered;
 }
 function formatDuration(timing, now) {
   if (!timing)
@@ -321,8 +354,8 @@ function fitActivityOnly(activity, width) {
 function fitActiveDetails(activity, runtime, width, now) {
   const observed = formatActivity(activity, now);
   if (!observed) {
-    const duration = runtime ? `dur ${runtime}` : undefined;
-    return fitFields([duration ?? ""], width);
+    const duration2 = runtime ? `dur ${runtime}` : undefined;
+    return fitFields([duration2 ?? ""], width);
   }
   const duration = runtime ? `dur ${runtime}` : undefined;
   if (duration) {
@@ -387,6 +420,17 @@ function directChildren(context, parentID) {
   }
   return result;
 }
+function familyDescendants(context, rootID) {
+  const result = [];
+  for (const sessionID of context.data.session.family(rootID)) {
+    if (sessionID === rootID)
+      continue;
+    const info = context.data.session.get(sessionID);
+    if (info)
+      result.push(info);
+  }
+  return result;
+}
 function isDirectChild(context, parentID, sessionID) {
   return context.data.session.get(sessionID)?.parentID === parentID;
 }
@@ -424,9 +468,10 @@ function createSubagentWatch(context, parent) {
   let activeParent;
   let reconnectQueued = false;
   const children = createMemo(() => directChildren(context, parent()));
-  const running = createMemo(() => runningSessions(context, children()));
+  const descendants = createMemo(() => familyDescendants(context, parent()));
+  const running = createMemo(() => runningSessions(context, descendants()));
   const lookupSession = (sessionID) => context.data.session.get(sessionID);
-  const records = createMemo(() => children().map((session) => ({
+  const records = createMemo(() => descendants().map((session) => ({
     session,
     status: displayStatus({
       running: running()[session.id] === true,
@@ -437,8 +482,9 @@ function createSubagentWatch(context, parent) {
     errorAt: errors()[session.id],
     depth: resolveDepth(parent(), session, lookupSession)
   })));
-  const list = createMemo(() => sortAndPrune(records()));
-  const summary = createMemo(() => summarize(records()));
+  const ordered = createMemo(() => outlineRecords(records(), parent()));
+  const list = createMemo(() => pruneList(ordered()));
+  const summary = createMemo(() => summarize(ordered()));
   const current = (run) => !disposed && run === generation;
   const isChild = (sessionID) => isDirectChild(context, parent(), sessionID);
   const observe = (sessionID, label, observedAt) => {
@@ -554,7 +600,7 @@ function createSubagentWatch(context, parent) {
     setRetries((previous) => clearSettled(previous, snapshot));
   });
   createEffect(() => {
-    const keep = new Set(children().map((child) => child.id));
+    const keep = new Set(descendants().map((child) => child.id));
     setTimings((previous) => pruneRecord(previous, keep));
     setErrors((previous) => pruneRecord(previous, keep));
     setRetries((previous) => pruneRecord(previous, keep));
@@ -569,11 +615,13 @@ function createSubagentWatch(context, parent) {
       off();
   };
   onCleanup(dispose);
-  return { children, records, list, summary, activities, loadState, stale, dispose };
+  return { children, descendants, records, list, summary, activities, loadState, stale, dispose };
 }
 
 // v2/tui.tsx
 var PLUGIN_ID = "opencode-subagent-watch-v2-tui";
+var SIDEBAR_SLOT = "sidebar.content";
+var SIDEBAR_PLACEMENT = "append";
 function theme(api) {
   return {
     text: api.theme.text.base,
@@ -607,7 +655,6 @@ function View(props) {
   const [hovered, setHovered] = createSignal3();
   let root;
   const watch = createSubagentWatch(api, () => props.sessionID);
-  const children = watch.children;
   const list = watch.list;
   const summary = watch.summary;
   const loadState = watch.loadState;
@@ -726,7 +773,7 @@ function View(props) {
           }
         }), _$createComponent(Show, {
           get when() {
-            return _$memo(() => loadState() === "ready")() && children().length === 0;
+            return _$memo(() => loadState() === "ready")() && list().visible.length === 0;
           },
           get children() {
             var _el$8 = _$createElement("text");
@@ -848,7 +895,7 @@ var tuiWatchPlugin = {
       toggle
     } = createCollapsedToggle(context);
     context.ui.slot({
-      append: "sidebar.content",
+      append: SIDEBAR_SLOT,
       render: (input) => _$createComponent(View, {
         context,
         get sessionID() {
@@ -869,9 +916,11 @@ var tuiWatchPlugin = {
 };
 var tui_default = Plugin.define(tuiWatchPlugin);
 export {
-  COLLAPSED_INITIAL,
-  COLLAPSED_KEY,
-  DEFAULT_COLLAPSED,
+  tui_default as default,
+  SIDEBAR_SLOT,
+  SIDEBAR_PLACEMENT,
   PLUGIN_ID,
-  tui_default as default
+  DEFAULT_COLLAPSED,
+  COLLAPSED_KEY,
+  COLLAPSED_INITIAL
 };
