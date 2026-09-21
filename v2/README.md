@@ -54,16 +54,15 @@ V2 has no `tui.json`; TUI plugins are listed in `cli.json`
 
 ```json
 {
-  "plugins": ["/home/lkonga/codes/opencode-plugins/opencode-subagent-watch/v2/dist/tui.js"]
+  "plugins": ["/home/lkonga/codes/opencode-plugins/opencode-subagent-watch/v2"]
 }
 ```
 
-Register the **built artifact path** (`v2/dist/tui.js`), not the package
-directory: V2 resolves a directory target through `Host.resolve` →
-`entry(["tui"])` (`packages/plugin/src/host.ts:17-43`), which joins `<dir>/tui`
-and would load `v2/tui.tsx` instead of the package's `exports` map. Naming the
-built file makes the loaded runtime bytes explicit. The package's `.` and
-`./tui` exports both resolve to that same `./dist/tui.js`.
+Register the **package directory**, not `v2/dist/tui.js`. The V2 TUI plugin
+reconciler intentionally skips configured local file targets and resolves local
+directories through `Host.resolve` → `entry(["tui"])`, loading `v2/tui.tsx` and
+watching it for hot reload. The package's `.` and `./tui` exports still resolve
+to `./dist/tui.js` for package consumers and release smokes.
 
 ## Public API used
 
