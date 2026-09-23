@@ -209,15 +209,11 @@ function displayTitle(session) {
   const stripped = full.replace(new RegExp(`\\s+\\(@${escapeRegExp(session.agent)} subagent\\)$`), "").trim();
   return stripped || full;
 }
-function modelsEqual(left, right) {
-  if (!left || !right)
-    return left === right;
-  return left.providerID === right.providerID && left.id === right.id;
-}
-function differingModel(child, parent) {
-  if (!child || modelsEqual(child, parent))
+function effectiveModel(child, parent) {
+  const model = child ?? parent;
+  if (!model)
     return;
-  return `${child.providerID}/${child.id}`;
+  return `${model.providerID}/${model.id}`;
 }
 function resolveSessionModel(session, messages) {
   if (session?.model)
@@ -402,7 +398,7 @@ function rowLines(child, parentModel, width, now, activity) {
   const agent = sanitizeText(child.session.agent ?? "");
   const runtime = formatDuration(child.timing, now);
   const cost = formatCost(child.session.cost);
-  const model = sanitizeText(differingModel(child.session.model, parentModel) ?? "") || undefined;
+  const model = sanitizeText(effectiveModel(child.session.model, parentModel) ?? "") || undefined;
   const second = isActive(child.status) ? fitActiveDetails(activity, runtime, width, now) : fitSettledDetails(runtime, cost, width);
   const third = fitIdentity(agent, model, width);
   return { first: truncateWidth(first, width), prefix, title, second, third };

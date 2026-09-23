@@ -218,20 +218,13 @@ export function displayTitle(session: Pick<SubagentSession, "title" | "agent">):
   return stripped || full;
 }
 
-export function modelsEqual(
-  left: SubagentModel | undefined,
-  right: SubagentModel | undefined,
-): boolean {
-  if (!left || !right) return left === right;
-  return left.providerID === right.providerID && left.id === right.id;
-}
-
-export function differingModel(
+export function effectiveModel(
   child: SubagentModel | undefined,
   parent: SubagentModel | undefined,
 ): string | undefined {
-  if (!child || modelsEqual(child, parent)) return;
-  return `${child.providerID}/${child.id}`;
+  const model = child ?? parent;
+  if (!model) return;
+  return `${model.providerID}/${model.id}`;
 }
 
 /**
@@ -529,7 +522,7 @@ export function rowLines(
   const agent = sanitizeText(child.session.agent ?? "");
   const runtime = formatDuration(child.timing, now);
   const cost = formatCost(child.session.cost);
-  const model = sanitizeText(differingModel(child.session.model, parentModel) ?? "") || undefined;
+  const model = sanitizeText(effectiveModel(child.session.model, parentModel) ?? "") || undefined;
   const second = isActive(child.status)
     ? fitActiveDetails(activity, runtime, width, now)
     : fitSettledDetails(runtime, cost, width);

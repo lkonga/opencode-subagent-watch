@@ -111,6 +111,29 @@ describe("V2 plugin definition", () => {
 });
 
 describe("V2 rendering and tracking", () => {
+  test("renders every child's effective model even when it matches the parent", async () => {
+    const harness = setupPlugin({ persisted: { collapsed: false } });
+    const model = { providerID: "anthropic", id: "claude" };
+    harness.addSession({ id: "parent", model });
+    harness.setMessages("parent", [
+      { type: "model-switched", model: { providerID: "xai", id: "grok" } },
+    ]);
+    harness.addSession({ id: "same", parentID: "parent", agent: "matching", model });
+    harness.addSession({ id: "inherited", parentID: "parent", agent: "fallback" });
+
+    const setup = await mount(harness, "parent");
+    try {
+      const frame = await setup.waitForFrame((value) =>
+        value.includes("matching · anthropic/claude"),
+      );
+      expect(frame).toContain("matching · anthropic/claude");
+      expect(frame).toContain("fallback · anthropic/claude");
+      expect(frame).not.toContain("xai/grok");
+    } finally {
+      setup.renderer.destroy();
+    }
+  });
+
   test("renders header counts, busy rows and settled rows", async () => {
     const harness = setupPlugin({ persisted: { collapsed: false } });
     harness.addSession(

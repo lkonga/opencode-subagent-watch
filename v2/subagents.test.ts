@@ -12,7 +12,7 @@ import {
   clearActivity,
   clearSettled,
   depthLabel,
-  differingModel,
+  effectiveModel,
   displayStatus,
   displayTitle,
   formatCost,
@@ -285,11 +285,32 @@ describe("identity and model resolution", () => {
     expect(displayTitle({ title: "Fix tests", agent: "explore" })).toBe("Fix tests");
   });
 
-  test("the parent model only shows when it differs", () => {
+  test("effectiveModel always shows the child's model", () => {
     const child = { providerID: "openrouter", id: "deepseek-v3.2" };
-    expect(differingModel(child, child)).toBeUndefined();
-    expect(differingModel(child, { providerID: "anthropic", id: "claude" })).toBe(
+    expect(effectiveModel(child, child)).toBe("openrouter/deepseek-v3.2");
+    expect(effectiveModel(child, { providerID: "anthropic", id: "claude" })).toBe(
       "openrouter/deepseek-v3.2",
+    );
+  });
+
+  test("effectiveModel falls back to the parent model", () => {
+    const parent = { providerID: "anthropic", id: "claude" };
+    expect(effectiveModel(undefined, parent)).toBe("anthropic/claude");
+    expect(effectiveModel(undefined, undefined)).toBeUndefined();
+  });
+
+  test("rows show a child model even when it equals the parent", () => {
+    const child = record({ id: "same-model" });
+    expect(rowLines(child, child.session.model, 40, NOW).third).toBe(
+      "  explore · openrouter/deepseek-v3.2",
+    );
+  });
+
+  test("rows use the effective parent model when child metadata is absent", () => {
+    const child = record({ id: "inherited-model" });
+    child.session.model = undefined;
+    expect(rowLines(child, { providerID: "anthropic", id: "claude" }, 40, NOW).third).toBe(
+      "  explore · anthropic/claude",
     );
   });
 
